@@ -1,113 +1,82 @@
-require('dotenv').config();
-const cliProgress = require('cli-progress');
-const fetch = require('isomorphic-fetch');
-const fs = require('fs');
-// env vars
-const budibaseAPIKey = process.env.BUDIBASE_API_KEY;
-const appID = process.env.APP_ID;
-const tableID = process.env.TABLE_ID;
+import dotenv from "dotenv";
+import fetch from "node-fetch";
+import fs from "fs";
+import { SingleBar } from "cli-progress";
 
-const progressBar = new cliProgress.SingleBar({
-  format: 'Fetching rows... | {bar} | {percentage}% | {value} Rows',
-  barCompleteChar: '\u2588',
-  barIncompleteChar: '\u2591',
-  hideCursor: true
+dotenv.config();
+
+const progressBar = new SingleBar({
+  format: "Fetching rows... | {bar} | {percentage}% | {value} Rows",
+  barCompleteChar: "\u2588",
+  barIncompleteChar: "\u2591",
+  hideCursor: true,
 });
 
-const options = { // budibase options for fetching rows
-  method: 'POST',
-  headers: {
-    accept: 'application/json',
-    'x-budibase-app-id': appID,
-    'content-type': 'application/json',
-    'x-budibase-api-key': budibaseAPIKey
-  },
-  body: JSON.stringify({ paginate: true, limit: 1000 })
-};
-
-function fetchRows(url, bookmark = null, accumulatedRows = []) {
-  const requestBody = { paginate: true, limit: 1000 };
-
-  if (bookmark) {
-    requestBody.bookmark = bookmark;
-  }
-
+const fetchRows = async (url, bookmark = null, accumulatedRows = []) => {
   const fetchOptions = {
-    ...options,
-    body: JSON.stringify(requestBody)
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "x-budibase-app-id": process.env.APP_ID,
+      "content-type": "application/json",
+      "x-budibase-api-key": process.env.BUDIBASE_API_KEY,
+    },
+    body: JSON.stringify({ paginate: true, limit: 5000, bookmark }),
   };
 
-  return fetch(url, fetchOptions)
-    .then(response => {
-      if (!response.ok) {
-        throw new Error(`Failed to fetch rows. Status: ${response.status}`);
-      }
-      return response.json();
-    })
-    .then(response => {
-      if (!response.data || !Array.isArray(response.data)) {
-        throw new Error('Invalid response format. Data array not found.');
-      }
-      const rows = response.data;
-      accumulatedRows.push(...rows);
+  const response = await fetch(url, fetchOptions);
+  const data = await response.json();
+  accumulatedRows.push(...data.data);
 
-      if (response.hasNextPage) {
-        progressBar.start(response.totalCount, 0);
-        progressBar.update(accumulatedRows.length);
+  progressBar.start(data.totalCount, 0);
+  progressBar.update(accumulatedRows.length);
 
-        return fetchRows(url, response.bookmark, accumulatedRows); // Pass the bookmark for the next page
-      } else {
-        progressBar.stop();
-        console.log(`All rows fetched. Converting to CSV...`);
-        return accumulatedRows;
-      }
-    })
-    .catch(err => {
-      console.error('An error occurred while fetching rows:', err);
-      throw err;
-    });
-}
+  return data.hasNextPage
+    ? fetchRows(url, data.bookmark, accumulatedRows)
+    : accumulatedRows;
+};
 
-function convertToCSV(rows) {
+const convertToCSV = (rows) => {
   const columns = new Set();
+  rows.forEach((row) =>
+    Object.keys(row).forEach((column) => columns.add(`"${column}"`))
+  );
 
-  rows.forEach(row => {
-    Object.keys(row).forEach(column => {
-      columns.add(`"${column}"`); // Wrap column names in double quotes
+  const csvRows = [Array.from(columns).join(",")];
+
+  rows.forEach((row) => {
+    const values = Array.from(columns).map((column) => {
+      const columnName = column.replace(/"/g, "");
+      const value = row[columnName];
+      return (typeof value === "object" && value !== null) ||
+        value === undefined ||
+        value === null
+        ? ""
+        : `"${value}"`;
     });
+    csvRows.push(values.join(","));
   });
 
-  const csvRows = [Array.from(columns).join(',')];
+  return csvRows.join("\n");
+};
 
-  rows.forEach(row => {
-    const values = Array.from(columns).map(column => {
-      const columnName = column.replace(/"/g, ''); // Remove double quotes from column name
-      if (typeof row[columnName] === 'object' && row[columnName] !== null) { // Check if the value is an object and not null
-        // return `"${row[columnName][0]._id}"`; // can't input relationships in imports so leave this out, re add later if it allowed
-        return;
-      } else {
-        return row[columnName] !== undefined && row[columnName] !== null ? `"${row[columnName]}"` : ''; // Wrap value in double quotes only if it is defined
-      }
-    });
-    csvRows.push(values.join(','));
-  });
-
-  return csvRows.join('\n');
-}
-
-function saveToCSVFile(content, filename) {
+const saveToCSVFile = (content, filename) => {
   fs.writeFileSync(filename, content);
   console.log(`CSV file saved as ${filename}`);
-}
+  process.exit(0);
+};
 
-const outputFilename = 'output.csv';
+const timestamp = new Date().toISOString().replace(/[:.-]/g, "");
+const outputFilename = `output_${timestamp}.csv`;
 
-fetchRows(`https://budibase.app/api/public/v1/tables/${tableID}/rows/search`, null)
-  .then(rows => {
+fetchRows(
+  `https://budibase.app/api/public/v1/tables/${process.env.TABLE_ID}/rows/search`
+)
+  .then((rows) => {
     console.log(`Rows fetched: ${rows.length}`);
-    const csvContent = convertToCSV(rows);
-    saveToCSVFile(csvContent, outputFilename);
+    saveToCSVFile(convertToCSV(rows), outputFilename);
   })
-  .catch(err => {
-    console.error('An error occurred:', err);
+  .catch((err) => {
+    console.error(err);
+    process.exit(1);
   });
